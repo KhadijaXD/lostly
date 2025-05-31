@@ -16,7 +16,7 @@ const auth = async (req, res, next) => {
       throw new Error();
     }
 
-    req.user = user;
+    req.user = { ...user.toObject(), id: user._id.toString() };
     req.token = token;
     next();
   } catch (error) {

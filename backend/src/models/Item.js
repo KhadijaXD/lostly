@@ -33,7 +33,7 @@ const itemSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['active', 'claimed', 'resolved'],
+    enum: ['active', 'claimed', 'resolved', 'found'],
     default: 'active'
   },
   postedBy: {
@@ -56,6 +56,22 @@ const itemSchema = new mongoose.Schema({
       default: 'pending'
     },
     message: String,
+    finderInfo: {
+      contactNumber: String,
+      email: String,
+      locationFound: String,
+      dateFound: Date,
+      additionalDetails: String
+    },
+    claimantInfo: {
+      contactNumber: String,
+      email: String,
+      proofDescription: String,
+      purchaseLocation: String,
+      purchaseDate: Date,
+      uniqueFeatures: String,
+      additionalProof: String
+    },
     createdAt: {
       type: Date,
       default: Date.now

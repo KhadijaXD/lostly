@@ -51,34 +51,60 @@ const deleteOldImage = async (itemId) => {
 
 // Create new item
 router.post('/', auth, upload.single('image'), async (req, res) => {
+  console.log('POST /api/items called');
   try {
     if (req.fileValidationError) {
+      console.error('File validation error:', req.fileValidationError);
       return res.status(400).json({ error: req.fileValidationError });
     }
 
     if (!req.file) {
+      console.error('No image file uploaded');
       return res.status(400).json({ error: 'Image is required' });
     }
 
+    const normalizedImagePath = req.file.path.replace(/\\/g, '/');
     const item = new Item({
       ...req.body,
-      image: req.file.path,
+      image: normalizedImagePath,
       postedBy: req.user._id
     });
 
     await item.save();
     res.status(201).json(item);
   } catch (error) {
+    console.error('Error in POST /api/items:', error);
     // Delete uploaded file if item creation fails
     if (req.file) {
       fs.unlinkSync(req.file.path);
     }
-    res.status(400).json({ error: error.message });
+    res.status(400).json({ error: error.message || 'Unknown error' });
+  }
+});
+
+// Debug endpoint to check database content
+router.get('/debug/database', async (req, res) => {
+  try {
+    const items = await Item.find({});
+    const debugInfo = items.map(item => ({
+      id: item._id,
+      name: item.name,
+      image: item.image,
+      imageType: typeof item.image,
+      createdAt: item.createdAt
+    }));
+    
+    console.log('Debug database content:', debugInfo);
+    res.json(debugInfo);
+  } catch (error) {
+    console.error('Error in debug endpoint:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
 // Get all items with filters
 router.get('/', async (req, res) => {
+  console.log('🔍 GET /api/items called with query:', req.query);
   try {
     const { type, category, status, postedBy } = req.query;
     const query = {};
@@ -88,13 +114,40 @@ router.get('/', async (req, res) => {
     if (status) query.status = status;
     if (postedBy) query.postedBy = postedBy;
 
+    // Exclude resolved items from public listings (unless specifically requested)
+    if (!status) {
+      query.status = { $ne: 'resolved' };
+    }
+
+    console.log('📋 Database query:', query);
+
     const items = await Item.find(query)
       .populate('postedBy', 'name email')
       .sort({ createdAt: -1 });
 
+    console.log('📊 Query results:', {
+      totalFound: items.length,
+      statusBreakdown: items.reduce((acc, item) => {
+        acc[item.status] = (acc[item.status] || 0) + 1;
+        return acc;
+      }, {}),
+      requestedStatus: status || 'all'
+    });
+
+    // Debug: log the first item's image path
+    if (items.length > 0) {
+      console.log('🖼️ First item image path:', items[0].image);
+      console.log('🔍 First item details:', {
+        name: items[0].name,
+        status: items[0].status,
+        type: items[0].type
+      });
+    }
+
     res.json(items);
   } catch (error) {
-    res.status(400).json({ error: error.message });
+    console.error('❌ Error in GET /api/items:', error);
+    res.status(400).json({ error: error.message || 'Unknown error' });
   }
 });
 
@@ -132,7 +185,8 @@ router.patch('/:id', auth, upload.single('image'), async (req, res) => {
     if (req.file) {
       // Delete old image
       await deleteOldImage(item._id);
-      req.body.image = req.file.path;
+      const normalizedImagePath = req.file.path.replace(/\\/g, '/');
+      req.body.image = normalizedImagePath;
     }
 
     Object.assign(item, req.body);
@@ -171,6 +225,7 @@ router.delete('/:id', auth, async (req, res) => {
 
 // Claim item
 router.post('/:id/claim', auth, async (req, res) => {
+  console.log('🎯 Claim request for item:', req.params.id, 'by user:', req.user._id);
   try {
     const item = await Item.findById(req.params.id);
     
@@ -187,17 +242,41 @@ router.post('/:id/claim', auth, async (req, res) => {
     );
 
     if (existingClaim) {
-      return res.status(400).json({ error: 'Already claimed this item' });
+      return res.status(400).json({ error: 'You have already claimed this item' });
     }
 
-    item.claims.push({
+    // Add the claim with comprehensive information
+    const newClaim = {
       user: req.user._id,
-      message: req.body.message
-    });
+      message: req.body.message,
+      status: 'pending',
+      claimantInfo: {
+        contactNumber: req.body.contactNumber,
+        email: req.body.email,
+        proofDescription: req.body.proofDescription,
+        uniqueFeatures: req.body.uniqueFeatures,
+        additionalProof: req.body.additionalProof
+      }
+    };
+
+    item.claims.push(newClaim);
+
+    // If this is a found item, automatically change status to claimed
+    if (item.status === 'found') {
+      item.status = 'claimed';
+      item.claimedBy = req.user._id;
+      console.log('✅ Item status changed to claimed for found item');
+    }
 
     await item.save();
+    
+    await item.populate('postedBy', 'name email');
+    await item.populate('claims.user', 'name email');
+    
+    console.log('✅ Claim successfully added');
     res.json(item);
   } catch (error) {
+    console.error('❌ Error in claim endpoint:', error);
     res.status(400).json({ error: error.message });
   }
 });
@@ -229,6 +308,48 @@ router.patch('/:id/claims/:claimId', auth, async (req, res) => {
     await item.save();
     res.json(item);
   } catch (error) {
+    res.status(400).json({ error: error.message });
+  }
+});
+
+// Report item as found
+router.patch('/:id/report-found', auth, async (req, res) => {
+  try {
+    const item = await Item.findById(req.params.id);
+    
+    if (!item) {
+      return res.status(404).json({ error: 'Item not found' });
+    }
+
+    if (item.status !== 'active') {
+      return res.status(400).json({ error: 'Item is not available to be reported as found' });
+    }
+
+    // Update item status to found
+    item.status = 'found';
+    
+    // Add finder information as a claim
+    item.claims.push({
+      user: req.user._id,
+      status: 'pending',
+      message: req.body.message || 'Item reported as found',
+      finderInfo: {
+        contactNumber: req.body.contactNumber,
+        email: req.body.email,
+        locationFound: req.body.locationFound,
+        dateFound: req.body.dateFound,
+        additionalDetails: req.body.additionalDetails
+      }
+    });
+
+    await item.save();
+    
+    await item.populate('postedBy', 'name email');
+    await item.populate('claims.user', 'name email');
+    
+    res.json(item);
+  } catch (error) {
+    console.error('Error reporting item as found:', error);
     res.status(400).json({ error: error.message });
   }
 });

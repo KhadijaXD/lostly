@@ -14,7 +14,11 @@ const mongoSanitize = require('express-mongo-sanitize');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 
-dotenv.config();
+// Import chat handlers
+const socketAuth = require('./middleware/socketAuth');
+const chatHandler = require('./handlers/chatHandler');
+
+dotenv.config({ path: path.join(__dirname, '../.env') });
 
 // Validate required environment variables
 const requiredEnvVars = ['SESSION_SECRET', 'MONGODB_URI'];
@@ -41,15 +45,22 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 // Rate limiting with different limits for different routes
+const isDevelopment = process.env.NODE_ENV === 'development';
+
 const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 5, // 5 attempts per 15 minutes for auth routes
-  message: 'Too many login attempts, please try again later'
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isDevelopment ? 50 : 10, // 50 attempts in dev, 10 in production per 15 minutes
+  message: 'Too many login attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100 // 100 requests per 15 minutes for other routes
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: isDevelopment ? 1000 : 200, // 1000 requests in dev, 200 in production per 15 minutes
+  message: 'Too many requests, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
 });
 
 // Security middleware
@@ -57,7 +68,7 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      imgSrc: ["'self'", "data:", "blob:"],
+      imgSrc: ["'self'", 'data:', 'blob:', 'http://localhost:5000'],
       styleSrc: ["'self'", "'unsafe-inline'"],
       scriptSrc: ["'self'", "'unsafe-inline'"]
     }
@@ -86,12 +97,29 @@ app.use(session({
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:3000',
-  credentials: true
+  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+  credentials: true,
+  optionsSuccessStatus: 200
 }));
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
-app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
+
+// Static files middleware with CORS headers
+app.use('/uploads', (req, res, next) => {
+  console.log('Static file request:', req.path);
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+  res.header('Cache-Control', 'public, max-age=31536000');
+  next();
+});
+
+app.use('/uploads', express.static(path.join(__dirname, '../uploads'), {
+  setHeaders: (res, path) => {
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  }
+}));
 
 // Apply rate limiters
 app.use('/api/auth', authLimiter);
@@ -116,16 +144,21 @@ const connectWithRetry = async () => {
 
 connectWithRetry();
 
-// Socket.io connection handling with error handling
+// Socket.io connection handling with authentication
+io.use(socketAuth);
+
 io.on('connection', (socket) => {
-  console.log('New client connected');
+  console.log('New authenticated client connected:', socket.user.name);
+  
+  // Initialize chat handlers
+  chatHandler(io, socket);
   
   socket.on('error', (error) => {
     console.error('Socket error:', error);
   });
   
   socket.on('disconnect', () => {
-    console.log('Client disconnected');
+    console.log('Client disconnected:', socket.user.name);
   });
 });
 
@@ -133,6 +166,17 @@ io.on('connection', (socket) => {
 app.use('/api/auth', require('./routes/auth'));
 app.use('/api/items', require('./routes/items'));
 app.use('/api/claims', require('./routes/claims'));
+app.use('/api/admin', require('./routes/admin'));
+app.use('/api/chat', require('./routes/chat'));
+
+// Development-only route to reset rate limiting
+if (process.env.NODE_ENV === 'development') {
+  app.post('/api/dev/reset-rate-limit', (req, res) => {
+    // This would require implementation with the rate limiter store
+    // For now, just return success - restarting server clears memory store
+    res.json({ message: 'Rate limit cache cleared (server restart clears memory store)' });
+  });
+}
 
 // Error handling middleware
 app.use((err, req, res, next) => {

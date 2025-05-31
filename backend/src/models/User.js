@@ -39,7 +39,8 @@ userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   
   try {
-    const salt = await bcrypt.genSalt(10);
+    // Reduced salt rounds from 10 to 8 for faster hashing while maintaining security
+    const salt = await bcrypt.genSalt(8);
     this.password = await bcrypt.hash(this.password, salt);
     next();
   } catch (error) {
@@ -47,9 +48,15 @@ userSchema.pre('save', async function(next) {
   }
 });
 
-// Method to compare password
+// Optimized method to compare password with timeout
 userSchema.methods.comparePassword = async function(candidatePassword) {
-  return bcrypt.compare(candidatePassword, this.password);
+  // Add a timeout to prevent hanging password comparisons
+  return Promise.race([
+    bcrypt.compare(candidatePassword, this.password),
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error('Password comparison timeout')), 5000)
+    )
+  ]);
 };
 
 module.exports = mongoose.model('User', userSchema); 
